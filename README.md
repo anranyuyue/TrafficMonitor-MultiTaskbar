@@ -3,7 +3,25 @@
 让 [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) 的任务栏窗口**同时显示在所有显示器的任务栏上**。
 原版只能在“主显示器 / 某一个副显示器”里选一个，这个补丁把“一个任务栏窗口”改成了“每个任务栏一个窗口”。
 
-> 本仓库只放**补丁 + 说明 + 截图 + 构建辅助脚本**，不含上游源码。请自行 clone 上游仓库后应用补丁。
+> 本仓库以**补丁 + 说明**为主，不含上游源码；同时在 [Releases](https://github.com/anranyuyue/TrafficMonitor-MultiTaskbar/releases/latest) 提供一份**开箱即用的 x64 构建**，不想自己编译的直接下载即可。
+
+---
+
+## 直接下载（免编译）
+
+不想折腾编译的，拿这一个压缩包就行：
+
+**[⬇ TrafficMonitor-MultiTaskbar-v1.8.6-x64.zip](https://github.com/anranyuyue/TrafficMonitor-MultiTaskbar/releases/latest/download/TrafficMonitor-MultiTaskbar-v1.8.6-x64.zip)**（Windows 10/11 · x64 · 约 1.2 MB）
+
+1. 解压到任意目录（**不要**在压缩包里直接双击运行）
+2. 双击 `TrafficMonitor.exe`
+3. 前提：Windows 设置里开启「在所有显示器上显示任务栏」
+
+包内 `config.ini` 已预置 `show_taskbar_wnd_in_all_displays = true`，打开就是所有任务栏都有窗口，不用再手动设置。
+想改回单个显示器：右键任务栏窗口 → 选项 → 任务栏设置 → 「显示任务栏窗口的显示器」。
+
+> 压缩包内附 `使用说明.txt`、`LICENSE.txt`（上游许可证原文）、`NOTICE.txt`（非官方修改版与 AI 使用声明）。
+> 校验值：`sha256 = 1e9b0feb96632b507d3efd26c9992ae4a110b0fa82111644fe2fecdc0e49af9e`
 
 ---
 
