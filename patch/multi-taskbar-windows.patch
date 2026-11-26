@@ -1,0 +1,929 @@
+diff --git a/TrafficMonitor/CommonData.h b/TrafficMonitor/CommonData.h
+index 130dcd9..b78883e 100644
+--- a/TrafficMonitor/CommonData.h
++++ b/TrafficMonitor/CommonData.h
+@@ -311,6 +311,7 @@ struct TaskBarSettingData : public PublicSettingData
+ 
+     bool show_taskbar_wnd_in_secondary_display{ false };    //是否在副显示器上显示任务栏窗口
+     int secondary_display_index{};      //在第几个副显示器上显示任务栏窗口
++    bool show_taskbar_wnd_in_all_displays{ false };         //是否在所有显示器（每个任务栏）上同时显示任务栏窗口
+     bool value_right_align{ false };    //数值是否右对齐
+     int digits_number{ 4 };             //数据位数
+     bool horizontal_arrange{ true };    //水平排列
+diff --git a/TrafficMonitor/TaskBarDlg.cpp b/TrafficMonitor/TaskBarDlg.cpp
+index 30f2ddc..ae001b9 100644
+--- a/TrafficMonitor/TaskBarDlg.cpp
++++ b/TrafficMonitor/TaskBarDlg.cpp
+@@ -470,12 +470,12 @@ bool CTaskBarDlg::AdjustWindowPos(bool force_adjust)
+ 
+     ::GetWindowRect(m_hTaskbar, m_rcTaskbar);   //获得任务栏的矩形区域
+ 
+-    static bool last_taskbar_on_top_or_bottom;
++    //注意：这里必须使用每个窗口各自的成员变量，否则多个任务栏窗口会互相干扰
+     CheckTaskbarOnTopOrBottom();
+-    if (force_adjust || m_taskbar_on_top_or_bottom != last_taskbar_on_top_or_bottom)
++    if (force_adjust || m_taskbar_on_top_or_bottom != m_last_taskbar_on_top_or_bottom)
+     {
+         CalculateWindowSize();
+-        last_taskbar_on_top_or_bottom = m_taskbar_on_top_or_bottom;
++        m_last_taskbar_on_top_or_bottom = m_taskbar_on_top_or_bottom;
+         force_adjust = true;
+     }
+ 
+@@ -597,15 +597,23 @@ void CTaskBarDlg::DPI(CRect& rect) const
+ 
+ CTaskBarDlg::ClassCheckWindowMonitorDPIAndHandle CTaskBarDlg::CheckWindowMonitorDPIAndHandle{};
+ 
+-UINT CTaskBarDlg::ClassCheckWindowMonitorDPIAndHandle::buffered_dpi_x{0};
+-UINT CTaskBarDlg::ClassCheckWindowMonitorDPIAndHandle::buffered_dpi_y{0};
+-UINT CTaskBarDlg::ClassCheckWindowMonitorDPIAndHandle::dpi_x{0};
+-UINT CTaskBarDlg::ClassCheckWindowMonitorDPIAndHandle::dpi_y{0};
++void CTaskBarDlg::SetTargetTaskbar(HWND hwnd, bool is_secondary)
++{
++    m_target_taskbar = hwnd;
++    m_target_taskbar_set = (hwnd != nullptr);
++    m_is_secondary_display = is_secondary;
++}
+ 
+ HWND CTaskBarDlg::FindTaskbarHandle(bool& is_scendary_display)
+ {
+     is_scendary_display = false;
+     HWND hTaskbar = nullptr;
++    //如果已经指定了任务栏窗口句柄，则直接使用它（多显示器同时显示任务栏窗口时使用）
++    if (m_target_taskbar_set && ::IsWindow(m_target_taskbar))
++    {
++        is_scendary_display = m_is_secondary_display;
++        return m_target_taskbar;
++    }
+     //显示在副显示器上
+     if (theApp.m_taskbar_data.show_taskbar_wnd_in_secondary_display && CWindowsSettingHelper::IsTaskbarShowingInAllDisplays())
+     {
+@@ -1167,7 +1175,7 @@ void CTaskBarDlg::OnInitMenu(CMenu* pMenu)
+         }
+     }
+ 
+-    ::SendMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_TASKBAR_MENU_POPED_UP, 0, 0); //通知主窗口菜单已弹出
++    ::SendMessage(theApp.m_pMainWnd->GetSafeHwnd(), WM_TASKBAR_MENU_POPED_UP, reinterpret_cast<WPARAM>(GetSafeHwnd()), 0); //通知主窗口菜单已弹出
+ }
+ 
+ BOOL CTaskBarDlg::PreTranslateMessage(MSG* pMsg)
+diff --git a/TrafficMonitor/TaskBarDlg.h b/TrafficMonitor/TaskBarDlg.h
+index 85e06a7..74eb123 100644
+--- a/TrafficMonitor/TaskBarDlg.h
++++ b/TrafficMonitor/TaskBarDlg.h
+@@ -26,6 +26,10 @@ public:
+ 
+     CToolTipCtrl m_tool_tips;
+ 
++    //指定此任务栏窗口要嵌入的任务栏窗口句柄。
++    //hwnd 为 nullptr 时表示由窗口自己查找任务栏（原来的行为）。
++    void SetTargetTaskbar(HWND hwnd, bool is_secondary);
++
+     void ShowInfo(CDC* pDC); 	//将信息绘制到控件上
+     void TryDrawStatusBar(IDrawCommon& drawer, const CRect& rect_bar, int usage_percent); //绘制CPU/内存状态条
+ 
+@@ -58,21 +62,19 @@ public:
+         template <class HandlerFunc>
+         void operator()(CTaskBarDlg& ref_taskbar_window, HandlerFunc handler)
+         {
++            UINT dpi_x{}, dpi_y{};
+             bool rtn = theApp.DPIFromRect(ref_taskbar_window.GetRectForDpiCheck(), &dpi_x, &dpi_y);
+             //只取dpi_x作为程序dpi
+-            if (rtn && (dpi_x != buffered_dpi_x || dpi_y != buffered_dpi_y))
++            //注意：每个任务栏窗口分别缓存自己的DPI，否则多显示器DPI不一致时会互相干扰
++            if (rtn && (dpi_x != ref_taskbar_window.m_buffered_dpi_x || dpi_y != ref_taskbar_window.m_buffered_dpi_y))
+             {
+                 //更新缓存的数据
+-                buffered_dpi_x = dpi_x;
+-                buffered_dpi_y = dpi_y;
++                ref_taskbar_window.m_buffered_dpi_x = dpi_x;
++                ref_taskbar_window.m_buffered_dpi_y = dpi_y;
+                 //调用用户自定义处理方法
+                 handler(dpi_x, dpi_y);
+             }
+         }
+-
+-    private:
+-        static UINT buffered_dpi_x, buffered_dpi_y;
+-        static UINT dpi_x, dpi_y;
+     } CheckWindowMonitorDPIAndHandle;
+ 
+     // 对话框数据
+@@ -143,11 +145,16 @@ protected:
+     std::map<CommonDisplayItem, std::list<int>> m_map_history_data;  //保存各项数据历史数据的链表，链表保存按照时间顺序，越靠近头部数据越新
+     std::map<CommonDisplayItem, int> m_history_data_count;            //统计添加到历史数据链表的次数
+ 
++    bool m_last_taskbar_on_top_or_bottom{ false };  //上一次的任务栏是否在屏幕顶部或底部（每个窗口独立保存）
+     bool m_connot_insert_to_task_bar{ false };	//如果窗口无法嵌入任务栏，则为true
+     bool m_taskbar_on_top_or_bottom{ true };		//如果任务栏在屏幕顶部或底部，则为ture
+     int m_error_code{};
+     bool m_menu_popuped{ false };               //指示当前是否有菜单处于弹出状态
+     bool m_is_secondary_display{ false };       //是否显示在副显示器中
++    HWND m_target_taskbar{};                    //指定此窗口要嵌入的任务栏窗口句柄
++    bool m_target_taskbar_set{ false };          //是否指定了任务栏窗口句柄
++    UINT m_buffered_dpi_x{};                    //上一次处理过的DPI（每个窗口独立保存）
++    UINT m_buffered_dpi_y{};
+     bool m_is_width_changed{ false };
+ 
+     UINT m_taskbar_dpi{};//TaskBarDlg自身专用dpi
+diff --git a/TrafficMonitor/TaskBarSettingsDlg.cpp b/TrafficMonitor/TaskBarSettingsDlg.cpp
+index 24e17c0..779f5d9 100644
+--- a/TrafficMonitor/TaskBarSettingsDlg.cpp
++++ b/TrafficMonitor/TaskBarSettingsDlg.cpp
+@@ -425,18 +425,24 @@ BOOL CTaskBarSettingsDlg::OnInitDialog()
+     std::vector<HWND> secondary_displays;
+     CTaskbarHelper::GetAllSecondaryDisplayTaskbar(secondary_displays);
+     //初始化“显示任务栏窗口的显示器”下拉列表
++    //  0: 主显示器    1: 所有显示器    2..: 副显示器 1..
+     m_displays_combo.AddString(CCommon::LoadText(IDS_PRIMARY_DISPLAY));
++    m_displays_combo.AddString(CCommon::LoadText(IDS_ALL_DISPLAYS));
+     for (size_t i = 0; i < secondary_displays.size(); i++)
+     {
+         m_displays_combo.AddString(CCommon::LoadTextFormat(IDS_SECONDARY_DISPLAY, { i + 1 }));
+     }
+-    if (!m_data.show_taskbar_wnd_in_secondary_display)
++    if (m_data.show_taskbar_wnd_in_all_displays)
++    {
++        m_displays_combo.SetCurSel(1);
++    }
++    else if (!m_data.show_taskbar_wnd_in_secondary_display)
+     {
+         m_displays_combo.SetCurSel(0);
+     }
+     else
+     {
+-        int combo_index = m_data.secondary_display_index + 1;
++        int combo_index = m_data.secondary_display_index + 2;
+         int combo_item_count = m_displays_combo.GetCount();
+         if (combo_index >= combo_item_count)
+             combo_index = combo_item_count - 1;
+@@ -970,12 +976,19 @@ void CTaskBarSettingsDlg::OnCbnSelchangeDisplayToShowTaskbarWndCombo()
+     if (combo_index == 0)
+     {
+         m_data.show_taskbar_wnd_in_secondary_display = false;
++        m_data.show_taskbar_wnd_in_all_displays = false;
++    }
++    else if (combo_index == 1)
++    {
++        //在所有显示器上同时显示
++        m_data.show_taskbar_wnd_in_secondary_display = false;
++        m_data.show_taskbar_wnd_in_all_displays = true;
+     }
+     else
+     {
+         m_data.show_taskbar_wnd_in_secondary_display = true;
+-        m_data.secondary_display_index = combo_index - 1;
+-
++        m_data.show_taskbar_wnd_in_all_displays = false;
++        m_data.secondary_display_index = combo_index - 2;
+     }
+ }
+ 
+diff --git a/TrafficMonitor/TaskbarHelper.cpp b/TrafficMonitor/TaskbarHelper.cpp
+index cdd8421..75e3ac5 100644
+--- a/TrafficMonitor/TaskbarHelper.cpp
++++ b/TrafficMonitor/TaskbarHelper.cpp
+@@ -101,6 +101,20 @@ void CTaskbarHelper::GetAllSecondaryDisplayTaskbar(std::vector<HWND>& secondary_
+     }
+ }
+ 
++void CTaskbarHelper::GetAllTaskbarWnd(std::vector<TaskbarWnd>& taskbars)
++{
++    taskbars.clear();
++    //主显示器的任务栏
++    HWND h_primary = ::FindWindow(_T("Shell_TrayWnd"), NULL);
++    if (h_primary != nullptr)
++        taskbars.push_back(TaskbarWnd{ h_primary, false });
++    //副显示器的任务栏
++    std::vector<HWND> secondary_taskbars;
++    GetAllSecondaryDisplayTaskbar(secondary_taskbars);
++    for (HWND h : secondary_taskbars)
++        taskbars.push_back(TaskbarWnd{ h, true });
++}
++
+ int CTaskbarHelper::GetDisplayNum()
+ {
+     monitors.clear();
+diff --git a/TrafficMonitor/TaskbarHelper.h b/TrafficMonitor/TaskbarHelper.h
+index 80e1afe..777fb49 100644
+--- a/TrafficMonitor/TaskbarHelper.h
++++ b/TrafficMonitor/TaskbarHelper.h
+@@ -6,6 +6,16 @@ public:
+     //获取所有副显示器上的任务栏，并确保按显示器的顺序
+     static void GetAllSecondaryDisplayTaskbar(std::vector<HWND>& secondary_taskbars);
+ 
++    //任务栏信息
++    struct TaskbarWnd
++    {
++        HWND hwnd{};
++        bool is_secondary{};
++    };
++
++    //获取所有任务栏（主显示器的任务栏在前，副显示器的任务栏按显示器顺序在后）
++    static void GetAllTaskbarWnd(std::vector<TaskbarWnd>& taskbars);
++
+     //获取显示器数量
+     static int GetDisplayNum();
+ 
+diff --git a/TrafficMonitor/TrafficMonitor.cpp b/TrafficMonitor/TrafficMonitor.cpp
+index 24a16a1..43b0a2c 100644
+--- a/TrafficMonitor/TrafficMonitor.cpp
++++ b/TrafficMonitor/TrafficMonitor.cpp
+@@ -174,6 +174,7 @@ void CTrafficMonitorApp::LoadConfig()
+     m_taskbar_data.display_item.FromInt(ini.GetInt(L"task_bar", L"tbar_display_item", DisplayItemSet{ TDI_UP, TDI_DOWN }.ToInt()));
+     m_taskbar_data.show_taskbar_wnd_in_secondary_display = ini.GetBool(L"task_bar", L"show_taskbar_wnd_in_secondary_display", false);
+     m_taskbar_data.secondary_display_index = ini.GetInt(L"task_bar", L"secondary_display_index", 0);
++    m_taskbar_data.show_taskbar_wnd_in_all_displays = ini.GetBool(L"task_bar", L"show_taskbar_wnd_in_all_displays", false);
+ 
+     //不含温度监控的版本，不显示温度监控相关项目
+ #ifdef WITHOUT_TEMPERATURE
+@@ -377,6 +378,7 @@ void CTrafficMonitorApp::SaveConfig()
+     //ini.WriteBool(L"task_bar", L"task_bar_swap_up_down", m_taskbar_data.swap_up_down);
+     ini.WriteBool(L"task_bar", L"show_taskbar_wnd_in_secondary_display", m_taskbar_data.show_taskbar_wnd_in_secondary_display);
+     ini.WriteInt(L"task_bar", L"secondary_display_index", m_taskbar_data.secondary_display_index);
++    ini.WriteBool(L"task_bar", L"show_taskbar_wnd_in_all_displays", m_taskbar_data.show_taskbar_wnd_in_all_displays);
+ 
+     ini.SaveDisplayStr(L"task_bar", m_taskbar_data.disp_str);
+     ini.SavePluginDisplayStr(L"plugin_display_str_taskbar_window", m_taskbar_data.disp_str);
+diff --git a/TrafficMonitor/TrafficMonitorDlg.cpp b/TrafficMonitor/TrafficMonitorDlg.cpp
+index 75f1e7c..3081860 100644
+--- a/TrafficMonitor/TrafficMonitorDlg.cpp
++++ b/TrafficMonitor/TrafficMonitorDlg.cpp
+@@ -1,4 +1,4 @@
+-﻿
++
+ // TrafficMonitorDlg.cpp : 实现文件
+ //
+ 
+@@ -41,11 +41,12 @@ CTrafficMonitorDlg::~CTrafficMonitorDlg()
+ {
+     free(m_pIfTable);
+ 
+-    if (m_tBarDlg != nullptr)
++    for (CTaskBarDlg* p_taskbar_wnd : m_tBarDlgs)
+     {
+-        delete m_tBarDlg;
+-        m_tBarDlg = nullptr;
++        delete p_taskbar_wnd;
+     }
++    m_tBarDlgs.clear();
++    m_tBarDlg = nullptr;
+ 
+     ::ReleaseDC(NULL, m_desktop_dc);
+ 
+@@ -69,6 +70,15 @@ CTaskBarDlg* CTrafficMonitorDlg::GetTaskbarWindow() const
+         return nullptr;
+ }
+ 
++void CTrafficMonitorDlg::ForEachTaskbarWnd(const std::function<void(CTaskBarDlg&)>& func) const
++{
++    for (CTaskBarDlg* p_taskbar_wnd : m_tBarDlgs)
++    {
++        if (p_taskbar_wnd != nullptr && ::IsWindow(p_taskbar_wnd->GetSafeHwnd()))
++            func(*p_taskbar_wnd);
++    }
++}
++
+ CTrafficMonitorDlg* CTrafficMonitorDlg::Instance()
+ {
+     return dynamic_cast<CTrafficMonitorDlg*>(theApp.m_pMainWnd);
+@@ -564,26 +574,31 @@ void CTrafficMonitorDlg::SetConnectionMenuState(CMenu* pMenu)
+ 
+ void CTrafficMonitorDlg::CloseTaskBarWnd()
+ {
+-    if (m_tBarDlg != nullptr)
++    for (CTaskBarDlg* p_taskbar_wnd : m_tBarDlgs)
+     {
+-        if (IsTaskbarWndValid())
+-            m_tBarDlg->OnCancel();
+-        delete m_tBarDlg;
+-        m_tBarDlg = nullptr;
+-        theApp.m_taskbar_data.update_layered_window_error_code = 0;
++        if (p_taskbar_wnd == nullptr)
++            continue;
++        if (::IsWindow(p_taskbar_wnd->GetSafeHwnd()))
++            p_taskbar_wnd->OnCancel();
++        delete p_taskbar_wnd;
+     }
++    m_tBarDlgs.clear();
++    m_tBarDlg = nullptr;
++    theApp.m_taskbar_data.update_layered_window_error_code = 0;
+ }
+ 
+-void CTrafficMonitorDlg::OpenTaskBarWnd()
++//创建一个任务栏窗口
++//target_taskbar: 要嵌入的任务栏窗口句柄。如果为 nullptr，则由窗口自己查找任务栏（即原来的行为）
++void CTrafficMonitorDlg::CreateTaskbarWnd(HWND target_taskbar, bool is_secondary)
+ {
+-    // 强制初始化theApp.m_is_windows11_taskbar的值
+-    theApp.CheckWindows11Taskbar();
++    CTaskBarDlg* p_taskbar_wnd{};
+     if (theApp.m_win_version.IsWine())
+-        m_tBarDlg = new CWineTaskbarDlg();
++        p_taskbar_wnd = new CWineTaskbarDlg();
+     else if (theApp.IsWindows11Taskbar())
+-        m_tBarDlg = new CWin11TaskbarDlg();
++        p_taskbar_wnd = new CWin11TaskbarDlg();
+     else
+-        m_tBarDlg = new CClassicalTaskbarDlg();
++        p_taskbar_wnd = new CClassicalTaskbarDlg();
++    p_taskbar_wnd->SetTargetTaskbar(target_taskbar, is_secondary);
+ 
+     CSupportedRenderEnums supported_render_enums{};
+     CTaskBarDlg::DisableRenderFeatureIfNecessary(supported_render_enums);
+@@ -595,16 +610,43 @@ void CTrafficMonitorDlg::OpenTaskBarWnd()
+     {
+         using namespace DrawCommonHelper;
+     case RenderType::D2D1_WITH_DCOMPOSITION:
+-        m_tBarDlg->Create(IDD_TASK_BAR_DIALOG_NOREDIRECTIONBITMAP, this);
++        p_taskbar_wnd->Create(IDD_TASK_BAR_DIALOG_NOREDIRECTIONBITMAP, this);
+         break;
+     // 包括RenderType::D2D1在内的其他值
+     default:
+-        m_tBarDlg->Create(IDD_TASK_BAR_DIALOG, this);
++        p_taskbar_wnd->Create(IDD_TASK_BAR_DIALOG, this);
+         break;
+     }
+-    m_tBarDlg->ShowWindow(SW_SHOW);
++    p_taskbar_wnd->ShowWindow(SW_SHOW);
++    m_tBarDlgs.push_back(p_taskbar_wnd);
+     //m_tBarDlg->ShowInfo();
+     //IniTaskBarConnectionMenu();
++    if (m_tBarDlg == nullptr)
++        m_tBarDlg = p_taskbar_wnd;
++}
++
++void CTrafficMonitorDlg::OpenTaskBarWnd()
++{
++    CloseTaskBarWnd();
++    // 强制初始化theApp.m_is_windows11_taskbar的值
++    theApp.CheckWindows11Taskbar();
++
++    if (theApp.m_taskbar_data.show_taskbar_wnd_in_all_displays)
++    {
++        //在每个显示器的任务栏上都显示任务栏窗口
++        std::vector<CTaskbarHelper::TaskbarWnd> taskbars;
++        CTaskbarHelper::GetAllTaskbarWnd(taskbars);
++        for (const auto& taskbar : taskbars)
++            CreateTaskbarWnd(taskbar.hwnd, taskbar.is_secondary);
++        //极少数情况下可能获取不到任务栏，此时回退到只创建一个窗口
++        if (m_tBarDlgs.empty())
++            CreateTaskbarWnd(nullptr, false);
++    }
++    else
++    {
++        //保持原来的行为：只创建一个任务栏窗口，由窗口自己决定显示在哪个任务栏
++        CreateTaskbarWnd(nullptr, false);
++    }
+ }
+ 
+ void CTrafficMonitorDlg::AddNotifyIcon()
+@@ -782,6 +824,7 @@ void CTrafficMonitorDlg::ApplySettings(COptionsDlg& optionsDlg)
+     bool d2d_turned_on = (theApp.m_taskbar_data.disable_d2d && !optionsDlg.m_tab2_dlg.m_data.disable_d2d);
+     //需要重新关闭再打开任务栏窗口的情况
+     bool taskbar_changed = (theApp.m_taskbar_data.show_taskbar_wnd_in_secondary_display != optionsDlg.m_tab2_dlg.m_data.show_taskbar_wnd_in_secondary_display
++        || theApp.m_taskbar_data.show_taskbar_wnd_in_all_displays != optionsDlg.m_tab2_dlg.m_data.show_taskbar_wnd_in_all_displays
+         || theApp.m_taskbar_data.secondary_display_index != optionsDlg.m_tab2_dlg.m_data.secondary_display_index
+         || theApp.m_taskbar_data.disable_d2d != optionsDlg.m_tab2_dlg.m_data.disable_d2d
+         || theApp.m_taskbar_data.IsTaskbarTransparent() != optionsDlg.m_tab2_dlg.m_data.IsTaskbarTransparent()
+@@ -808,7 +851,7 @@ void CTrafficMonitorDlg::ApplySettings(COptionsDlg& optionsDlg)
+     //CTaskBarDlg::SaveConfig();
+     if (IsTaskbarWndValid())
+     {
+-        m_tBarDlg->ApplySettings();
++        ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.ApplySettings(); });
+         //如果更改了任务栏窗口字体或显示的文本，则任务栏窗口可能要变化，于是关闭再打开任务栏窗口
+         if (taskbar_changed)
+         {
+@@ -817,9 +860,9 @@ void CTrafficMonitorDlg::ApplySettings(COptionsDlg& optionsDlg)
+         }
+         else
+         {
+-            m_tBarDlg->WidthChanged();
++            ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.WidthChanged(); });
+         }
+-        m_tBarDlg->ApplyWindowTransparentColor();
++        ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.ApplyWindowTransparentColor(); });
+     }
+ 
+     if (optionsDlg.m_tab3_dlg.IsAutoRunModified())
+@@ -972,7 +1015,12 @@ void CTrafficMonitorDlg::SetTextFont()
+ 
+ bool CTrafficMonitorDlg::IsTaskbarWndValid() const
+ {
+-    return m_tBarDlg != nullptr && ::IsWindow(m_tBarDlg->GetSafeHwnd());
++    for (CTaskBarDlg* p_taskbar_wnd : m_tBarDlgs)
++    {
++        if (p_taskbar_wnd != nullptr && ::IsWindow(p_taskbar_wnd->GetSafeHwnd()))
++            return true;
++    }
++    return false;
+ }
+ 
+ void CTrafficMonitorDlg::TaskbarShowHideItem(DisplayItem type)
+@@ -990,7 +1038,7 @@ void CTrafficMonitorDlg::TaskbarShowHideItem(DisplayItem type)
+         }
+         //CloseTaskBarWnd();
+         //OpenTaskBarWnd();
+-        m_tBarDlg->WidthChanged();
++        ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.WidthChanged(); });
+     }
+ }
+ 
+@@ -1642,7 +1690,7 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+                 ShowWindow(SW_HIDE);
+ 
+             //打开任务栏窗口
+-            if (theApp.m_cfg_data.m_show_task_bar_wnd && m_tBarDlg == nullptr)
++            if (theApp.m_cfg_data.m_show_task_bar_wnd && m_tBarDlgs.empty())
+                 OpenTaskBarWnd();
+ 
+             //如果窗口的位置为(0, 0)，则在初始化时MoveWindow函数无效，此时再移动一次窗口
+@@ -1743,7 +1791,7 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+         if (!theApp.m_cfg_data.m_hide_main_window || theApp.m_cfg_data.m_show_task_bar_wnd)
+         {
+             //每隔10秒钟检测一次是否可以嵌入任务栏
+-            if (!theApp.m_win_version.IsWine() && IsTaskbarWndValid() && m_timer_cnt % 10 == 1)
++            if (!theApp.m_win_version.IsWine() && IsTaskbarWndValid() && m_tBarDlg != nullptr && m_timer_cnt % 10 == 1)
+             {
+                 if (m_tBarDlg->GetCannotInsertToTaskBar() && m_insert_to_taskbar_cnt < MAX_INSERT_TO_TASKBAR_CNT)
+                 {
+@@ -1865,7 +1913,7 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+             }
+             if (restart_taskbar_dlg && IsTaskbarWndValid())
+             {
+-                m_tBarDlg->ApplyWindowTransparentColor();
++                ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.ApplyWindowTransparentColor(); });
+                 //CloseTaskBarWnd();
+                 //OpenTaskBarWnd();
+ 
+@@ -1931,25 +1979,33 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+             && IsTaskbarWndValid() && theApp.m_taskbar_data.transparent_color != 0
+             && !m_is_foreground_fullscreen && theApp.m_taskbar_data.disable_d2d)
+         {
+-            CRect rect;
+-            ::GetWindowRect(m_tBarDlg->GetSafeHwnd(), rect);
+-            int pointx{ rect.left - 1 };
+-            if (theApp.m_taskbar_data.tbar_wnd_on_left && m_tBarDlg->IsTasksbarOnTopOrBottom())
+-                pointx = rect.right + 1;
+-            int pointy = rect.bottom;
+-            if (pointx < 0) pointx = 0;
+-            if (pointx >= m_screen_size.cx) pointx = m_screen_size.cx - 1;
+-            if (pointy < 0) pointy = 0;
+-            if (pointy >= m_screen_size.cy) pointy = m_screen_size.cy - 1;
+-            COLORREF color = ::GetPixel(m_desktop_dc, pointx, pointy);        //取任务栏窗口左侧1像素处的颜色作为背景色
+-            if (!CCommon::IsColorSimilar(color, theApp.m_taskbar_data.back_color) && (/*CWindowsSettingHelper::IsWindows10LightTheme() ||*/ color != 0))
++            //每个显示器上的任务栏窗口分别取自己附近的颜色（不同显示器的任务栏颜色可能不同）
++            const int virtual_x = ::GetSystemMetrics(SM_XVIRTUALSCREEN);
++            const int virtual_y = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
++            const int virtual_cx = ::GetSystemMetrics(SM_CXVIRTUALSCREEN);
++            const int virtual_cy = ::GetSystemMetrics(SM_CYVIRTUALSCREEN);
++            ForEachTaskbarWnd([&](CTaskBarDlg& taskbar_wnd)
+             {
+-                bool is_taskbar_transparent{ theApp.m_taskbar_data.IsTaskbarTransparent()};
+-                theApp.m_taskbar_data.back_color = color;
+-                theApp.m_taskbar_data.SetTaskabrTransparent(is_taskbar_transparent);
+-                if (is_taskbar_transparent)
+-                    m_tBarDlg->ApplyWindowTransparentColor();
+-            }
++                CRect rect;
++                ::GetWindowRect(taskbar_wnd.GetSafeHwnd(), rect);
++                int pointx{ rect.left - 1 };
++                if (theApp.m_taskbar_data.tbar_wnd_on_left && taskbar_wnd.IsTasksbarOnTopOrBottom())
++                    pointx = rect.right + 1;
++                int pointy = rect.bottom;
++                if (pointx < virtual_x) pointx = virtual_x;
++                if (pointx >= virtual_x + virtual_cx) pointx = virtual_x + virtual_cx - 1;
++                if (pointy < virtual_y) pointy = virtual_y;
++                if (pointy >= virtual_y + virtual_cy) pointy = virtual_y + virtual_cy - 1;
++                COLORREF color = ::GetPixel(m_desktop_dc, pointx, pointy);        //取任务栏窗口外侧1像素处的颜色作为背景色
++                if (!CCommon::IsColorSimilar(color, theApp.m_taskbar_data.back_color) && (color != 0))
++                {
++                    bool is_taskbar_transparent{ theApp.m_taskbar_data.IsTaskbarTransparent() };
++                    theApp.m_taskbar_data.back_color = color;
++                    theApp.m_taskbar_data.SetTaskabrTransparent(is_taskbar_transparent);
++                    if (is_taskbar_transparent)
++                        taskbar_wnd.ApplyWindowTransparentColor();
++                }
++            });
+         }
+ 
+         //当检测到背景色和文字颜色都为黑色写入错误日志
+@@ -1984,7 +2040,8 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+     if (nIDEvent == TASKBAR_TIMER)
+     {
+         ++m_taskbar_timer_cnt;
+-        if (m_taskbar_timer_cnt % 5 == 0 && theApp.m_cfg_data.m_show_task_bar_wnd && theApp.m_taskbar_data.show_taskbar_wnd_in_secondary_display)
++        if (m_taskbar_timer_cnt % 5 == 0 && theApp.m_cfg_data.m_show_task_bar_wnd
++            && (theApp.m_taskbar_data.show_taskbar_wnd_in_secondary_display || theApp.m_taskbar_data.show_taskbar_wnd_in_all_displays))
+         {
+             static int last_taskbar_num = 0;
+             int taskbar_num = CTaskbarHelper::GetSecondaryTaskbarNum();
+@@ -2007,20 +2064,24 @@ void CTrafficMonitorDlg::OnTimer(UINT_PTR nIDEvent)
+             //每次100ms*10执行一次屏幕DPI检查，并且尽可能少的检查操作系统版本
+             if (m_taskbar_timer_cnt % 10 == 0 && theApp.m_win_version.IsWindows8Point1OrLater())
+             {
+-                CTaskBarDlg::CheckWindowMonitorDPIAndHandle(*m_tBarDlg, [p_TaskBarDlg = m_tBarDlg](UINT new_dpi_x, UINT new_dpi_y)
+-                                                            {
+-                                                                // auto s_dpi = std::to_string(new_dpi_x);
+-                                                                // s_dpi += '\n';
+-                                                                // TRACE(s_dpi.c_str());
+-                                                                //考虑到任务栏窗口可能和主窗口不在同一个屏幕上，dpi可能不同
+-                                                                //设置DPI并刷新窗口
+-                                                                p_TaskBarDlg->SetDPI(new_dpi_x);
+-                                                                p_TaskBarDlg->SetTextFont();
+-                                                                p_TaskBarDlg->CalculateWindowSize(); });
++                //每个任务栏窗口分别检查自己所在显示器的DPI
++                ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd)
++                {
++                    CTaskBarDlg::CheckWindowMonitorDPIAndHandle(taskbar_wnd, [&taskbar_wnd](UINT new_dpi_x, UINT new_dpi_y)
++                                                                {
++                                                                    //考虑到任务栏窗口可能和主窗口不在同一个屏幕上，dpi可能不同
++                                                                    //设置DPI并刷新窗口
++                                                                    taskbar_wnd.SetDPI(new_dpi_x);
++                                                                    taskbar_wnd.SetTextFont();
++                                                                    taskbar_wnd.CalculateWindowSize(); });
++                });
+             }
+ 
+-            m_tBarDlg->AdjustWindowPos();
+-            m_tBarDlg->Invalidate(FALSE);
++            ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd)
++            {
++                taskbar_wnd.AdjustWindowPos();
++                taskbar_wnd.Invalidate(FALSE);
++            });
+         }
+     }
+ 
+@@ -2133,8 +2194,11 @@ void CTrafficMonitorDlg::OnNetworkInfo()
+     aDlg.m_start_time = m_start_time;
+     aDlg.DoModal();
+     //SetAlwaysOnTop(); //由于在“连接详情”对话框内设置了取消窗口置顶，所有在对话框关闭后，重新设置窗口置顶
+-    if (m_tBarDlg != nullptr)
+-        m_tBarDlg->m_tool_tips.SetWindowPos(&wndTopMost, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);  //重新设置任务栏窗口的提示信息置顶
++    ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd)
++    {
++        if (::IsWindow(taskbar_wnd.m_tool_tips.GetSafeHwnd()))
++            taskbar_wnd.m_tool_tips.SetWindowPos(&wndTopMost, 0, 0, 0, 0, SWP_NOSIZE | SWP_NOMOVE);  //重新设置任务栏窗口的提示信息置顶
++    });
+ }
+ 
+ 
+@@ -2194,7 +2258,7 @@ void CTrafficMonitorDlg::OnClose()
+     BackupHistoryTrafficFile();
+ 
+     if (IsTaskbarWndValid())
+-        m_tBarDlg->OnCancel();
++        CloseTaskBarWnd();
+ 
+     //确保在退出前关闭所有窗口
+     for (const auto& item : CBaseDialog::AllUniqueHandels())
+@@ -2524,7 +2588,7 @@ void CTrafficMonitorDlg::OnShowCpuMemory2()
+         //切换显示CPU和内存利用率时，删除任务栏窗口，再重新显示
+         //CloseTaskBarWnd();
+         //OpenTaskBarWnd();
+-        m_tBarDlg->WidthChanged();
++        ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.WidthChanged(); });
+     }
+ }
+ 
+@@ -2557,7 +2621,7 @@ void CTrafficMonitorDlg::OnMousePenetrate()
+ void CTrafficMonitorDlg::OnShowTaskBarWnd()
+ {
+     // TODO: 在此添加命令处理程序代码
+-    if (m_tBarDlg != nullptr)
++    if (!m_tBarDlgs.empty())
+     {
+         CloseTaskBarWnd();
+     }
+@@ -2592,7 +2656,7 @@ void CTrafficMonitorDlg::OnAppAbout()
+ //当资源管理器重启时会触发此消息
+ LRESULT CTrafficMonitorDlg::OnTaskBarCreated(WPARAM wParam, LPARAM lParam)
+ {
+-    if (m_tBarDlg != nullptr)
++    if (!m_tBarDlgs.empty())
+     {
+         CloseTaskBarWnd();
+         if (theApp.m_general_data.show_notify_icon)
+@@ -2718,7 +2782,10 @@ void CTrafficMonitorDlg::OnOptions()
+ void CTrafficMonitorDlg::OnOptions2()
+ {
+     CWnd* pParent = this;
+-    if (IsTaskbarWndValid())
++    //优先以弹出菜单的任务栏窗口作为父窗口（多显示器时可能有多个任务栏窗口）
++    if (::IsWindow(m_active_menu_taskbar_wnd))
++        pParent = CWnd::FromHandle(m_active_menu_taskbar_wnd);
++    else if (IsTaskbarWndValid())
+         pParent = m_tBarDlg;
+     _OnOptions(1, pParent);
+ }
+@@ -2770,6 +2837,8 @@ void CTrafficMonitorDlg::OnCheckUpdate()
+ 
+ afx_msg LRESULT CTrafficMonitorDlg::OnTaskbarMenuPopedUp(WPARAM wParam, LPARAM lParam)
+ {
++    //记录弹出菜单的任务栏窗口句柄（多显示器时可能有多个任务栏窗口）
++    m_active_menu_taskbar_wnd = reinterpret_cast<HWND>(wParam);
+     //设置“选择连接”子菜单项中各单选项的选择状态
+     SetConnectionMenuState(theApp.m_taskbar_menu.GetSubMenu(0)->GetSubMenu(0));
+     SetConnectionMenuState(theApp.m_taskbar_menu_plugin.GetSubMenu(0)->GetSubMenu(0));
+@@ -2796,7 +2865,7 @@ void CTrafficMonitorDlg::OnShowNetSpeed()
+         }
+         //CloseTaskBarWnd();
+         //OpenTaskBarWnd();
+-        m_tBarDlg->WidthChanged();
++        ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.WidthChanged(); });
+     }
+ }
+ 
+@@ -2853,9 +2922,12 @@ afx_msg LRESULT CTrafficMonitorDlg::OnDpichanged(WPARAM wParam, LPARAM lParam)
+         if (pThis->IsTaskbarWndValid() && !theApp.m_win_version.IsWindows8Point1OrLater())
+         {
+             //为任务栏窗口重新指定DPI
+-            pThis->m_tBarDlg->SetDPI(dpi);
+-            //根据新的DPI重新设置任务栏窗口字体
+-            pThis->m_tBarDlg->SetTextFont();
++            pThis->ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd)
++            {
++                taskbar_wnd.SetDPI(dpi);
++                //根据新的DPI重新设置任务栏窗口字体
++                taskbar_wnd.SetTextFont();
++            });
+         }
+ 
+         pThis->LoadSkinLayout();   //根据当前选择的皮肤获取布局数据
+@@ -2897,8 +2969,7 @@ afx_msg LRESULT CTrafficMonitorDlg::OnMonitorInfoUpdated(WPARAM wParam, LPARAM l
+         m_tool_tips.UpdateTipText(tip_info, this);
+     }
+     //更新任务栏窗口鼠标提示
+-    if (IsTaskbarWndValid())
+-        m_tBarDlg->UpdateToolTips();
++    ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.UpdateToolTips(); });
+     return 0;
+ }
+ 
+@@ -2967,7 +3038,7 @@ void CTrafficMonitorDlg::OnDisplaySettings()
+         //CloseTaskBarWnd();
+         //OpenTaskBarWnd();
+         if (IsTaskbarWndValid())
+-            m_tBarDlg->WidthChanged();
++            ForEachTaskbarWnd([](CTaskBarDlg& taskbar_wnd) { taskbar_wnd.WidthChanged(); });
+     }
+ }
+ 
+diff --git a/TrafficMonitor/TrafficMonitorDlg.h b/TrafficMonitor/TrafficMonitorDlg.h
+index 35c1326..7a17e2a 100644
+--- a/TrafficMonitor/TrafficMonitorDlg.h
++++ b/TrafficMonitor/TrafficMonitorDlg.h
+@@ -25,6 +25,7 @@
+ #include "PdhHardwareQuery/GpuUsage.h"
+ #include "PdhHardwareQuery/DiskUsage.h"
+ #include "HistoryTrafficFile.h"
++#include <functional>
+ 
+ // CTrafficMonitorDlg 对话框
+ class CTrafficMonitorDlg : public CDialog
+@@ -34,6 +35,8 @@ public:
+     CTrafficMonitorDlg(CWnd* pParent = NULL);   // 标准构造函数
+     ~CTrafficMonitorDlg();
+     CTaskBarDlg* GetTaskbarWindow() const;
++    //对所有任务栏窗口执行指定的操作（启用“所有显示器”时会有多个任务栏窗口）
++    void ForEachTaskbarWnd(const std::function<void(CTaskBarDlg&)>& func) const;
+ 
+     static CTrafficMonitorDlg* Instance();
+ 
+@@ -55,7 +58,9 @@ protected:
+ protected:
+     HICON m_hIcon;
+     NOTIFYICONDATA m_ntIcon;    //通知区域图标
+-    CTaskBarDlg* m_tBarDlg{};     //任务栏窗口的指针
++    CTaskBarDlg* m_tBarDlg{};     //任务栏窗口的指针（m_tBarDlgs 中的第一个，用于兼容只处理单个任务栏窗口的代码）
++    std::vector<CTaskBarDlg*> m_tBarDlgs;   //所有任务栏窗口（启用“所有显示器”时每个任务栏对应一个窗口）
++    HWND m_active_menu_taskbar_wnd{};       //当前弹出右键菜单的任务栏窗口句柄
+ 
+     vector<NetWorkConection> m_connections; //保存获取到的要显示到“选择网卡”菜单项中的所有网络连接
+     MIB_IFTABLE* m_pIfTable;
+@@ -163,6 +168,7 @@ protected:
+ 
+     void CloseTaskBarWnd(); //关闭任务栏窗口
+     void OpenTaskBarWnd();  //打开任务栏窗口
++    void CreateTaskbarWnd(HWND target_taskbar, bool is_secondary);  //创建一个任务栏窗口
+ 
+     void AddNotifyIcon();       //添加通知区图标
+     void DeleteNotifyIcon();
+diff --git a/TrafficMonitor/language.h b/TrafficMonitor/language.h
+index 659fc2b..6aa9237 100644
+--- a/TrafficMonitor/language.h
++++ b/TrafficMonitor/language.h
+@@ -214,6 +214,7 @@
+ #define IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG L"IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG"
+ #define IDS_PRIMARY_DISPLAY L"IDS_PRIMARY_DISPLAY"
+ #define IDS_SECONDARY_DISPLAY L"IDS_SECONDARY_DISPLAY"
++#define IDS_ALL_DISPLAYS L"IDS_ALL_DISPLAYS"
+ #define IDS_RESTORE_FROM_SLEEP_LOG L"IDS_RESTORE_FROM_SLEEP_LOG"
+ #define IDS_PLUGIN_NEW_VERSION_INFO L"IDS_PLUGIN_NEW_VERSION_INFO"
+ #define IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION L"IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION"
+diff --git a/TrafficMonitor/language/English.ini b/TrafficMonitor/language/English.ini
+index 2d62d80..d1e5f8b 100644
+--- a/TrafficMonitor/language/English.ini
++++ b/TrafficMonitor/language/English.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Plugin Options"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Get CPU usage by performance counter failed, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Primary display"
+ IDS_SECONDARY_DISPLAY = "Secondary display <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "The system has been restored from hibernation, the connection has been reinitialized. (<%1%> times has been reinitialized.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Update available, latest version: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor Plugin Notification"
+diff --git a/TrafficMonitor/language/French.ini b/TrafficMonitor/language/French.ini
+index 2895f35..a34b132 100644
+--- a/TrafficMonitor/language/French.ini
++++ b/TrafficMonitor/language/French.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Options du plugin"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Échec de la récupération de l'utilisation du CPU par le compteur de performances, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Écran principal"
+ IDS_SECONDARY_DISPLAY = "Écran secondaire <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Le système a été restauré depuis la mise en veille, la connexion a été réinitialisée. (<%1%> réinitialisations effectuées.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Mise à jour disponible, dernière version : <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Notification de plugin TrafficMonitor"
+diff --git a/TrafficMonitor/language/German.ini b/TrafficMonitor/language/German.ini
+index c1f3366..698a8e4 100644
+--- a/TrafficMonitor/language/German.ini
++++ b/TrafficMonitor/language/German.ini
+@@ -221,6 +221,7 @@ IDS_PLUGIN_OPTIONS = "Plugin-Optionen"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Das Erfassen der CPU-Nutzung durch den Performance Counter ist fehlgeschlagen, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Primäres Display"
+ IDS_SECONDARY_DISPLAY = "Sekundäres Display <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Das System wurde aus dem Ruhezustand geweckt, die Verbindung wurde reinitialisiert. (<%1%> mal reinitialisiert.)"
+ 
+ TXT_OK = "OK"
+diff --git a/TrafficMonitor/language/Hebrew.ini b/TrafficMonitor/language/Hebrew.ini
+index f7fd665..65e399f 100644
+--- a/TrafficMonitor/language/Hebrew.ini
++++ b/TrafficMonitor/language/Hebrew.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "אפשרויות תוסף"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "קבלת ניצול המעבד על ידי מונה הביצועים נכשלה, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "מסך ראשי"
+ IDS_SECONDARY_DISPLAY = "מסך משני <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "המערכת חזרה ממצב שינה, החיבור אופס מחדש. (<%1%> פעמים אופס מחדש.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "זמין עדכון, גרסה אחרונה: <%1%>"
+ 
+diff --git a/TrafficMonitor/language/Hungarian.ini b/TrafficMonitor/language/Hungarian.ini
+index 416f888..e8a0f56 100644
+--- a/TrafficMonitor/language/Hungarian.ini
++++ b/TrafficMonitor/language/Hungarian.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Bővítmény opciók"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "CPU-használat lekérése teljesítményszámláló szerint sikertelen, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Elsődleges kijelző"
+ IDS_SECONDARY_DISPLAY = "Másodlagos kijelző <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "A rendszer helyreállt a hibernált állapotból, a kapcsolat újrainicializálódott. (<%1%> az időzítés újraindítva.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Update available, latest version: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor beépülő modul értesítése"
+diff --git a/TrafficMonitor/language/Italian.ini b/TrafficMonitor/language/Italian.ini
+index 0cf3463..13ca577 100644
+--- a/TrafficMonitor/language/Italian.ini
++++ b/TrafficMonitor/language/Italian.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Opzioni plugin"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Ottenimento uso CPU la contatore prestazioni fallito, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Monitor principale"
+ IDS_SECONDARY_DISPLAY = "Monitor secondario <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Questo sistema si è riattivato dall'ibernazione, e la connessione è stata re-inizializzata (re-inizializzata <%1%> volte)."
+ IDS_PLUGIN_NEW_VERSION_INFO = "Aggiornamento disponibile, versione aggiornata: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Notifica plugin TrafficMonitor"
+diff --git a/TrafficMonitor/language/Japanese.ini b/TrafficMonitor/language/Japanese.ini
+index 87e01e9..90f4f82 100644
+--- a/TrafficMonitor/language/Japanese.ini
++++ b/TrafficMonitor/language/Japanese.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "プラグインのオプション"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "パフォーマンスカウンタによるCPU使用率の取得に失敗しました。fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "プライマリディスプレイ"
+ IDS_SECONDARY_DISPLAY = "セカンダリディスプレイ <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "システムがスリープから復帰したため、接続を再初期化しました。(再初期化回数: <%1%>回)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "更新があります。最新バージョン: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor プラグイン通知"
+diff --git a/TrafficMonitor/language/Korean.ini b/TrafficMonitor/language/Korean.ini
+index b284d3f..f3f49cf 100644
+--- a/TrafficMonitor/language/Korean.ini
++++ b/TrafficMonitor/language/Korean.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "플러그인 옵션"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "성능 카운터로 CPU 사용량 가져오기 실패, 경로=<%1%>"
+ IDS_PRIMARY_DISPLAY = "주 모니터"
+ IDS_SECONDARY_DISPLAY = "보조 모니터 <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "절전 모드에서 복귀하여 연결을 재초기화했습니다. (<%1%>회)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "새 버전 사용 가능: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor 플러그인 알림"
+diff --git a/TrafficMonitor/language/Polish.ini b/TrafficMonitor/language/Polish.ini
+index 56d164f..ce6b0ff 100644
+--- a/TrafficMonitor/language/Polish.ini
++++ b/TrafficMonitor/language/Polish.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Opcje wtyczki"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Nie udało się pobrać użycia CPU przez licznik wydajności, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Główny wyświetlacz"
+ IDS_SECONDARY_DISPLAY = "Wyświetlacz pomocniczy <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ 
+ TXT_OK = "OK"
+ TXT_CANCEL = "Anuluj"
+diff --git a/TrafficMonitor/language/Portuguese_Brazilian.ini b/TrafficMonitor/language/Portuguese_Brazilian.ini
+index d8754ae..959101a 100644
+--- a/TrafficMonitor/language/Portuguese_Brazilian.ini
++++ b/TrafficMonitor/language/Portuguese_Brazilian.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Opções do Plug-in"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Falha ao obter uso da CPU por contadores de desempenho, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Monitor principal"
+ IDS_SECONDARY_DISPLAY = "Monitor secundário <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "O sistema retornou do modo de hibernação; a conexão foi reinicializada. (<%1%> vezes)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Atualização disponível, versão mais recente: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Notificação do Plugin do TrafficMonitor"
+diff --git a/TrafficMonitor/language/Russian.ini b/TrafficMonitor/language/Russian.ini
+index e4d5d40..966910c 100644
+--- a/TrafficMonitor/language/Russian.ini
++++ b/TrafficMonitor/language/Russian.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Настройки плагина"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Не удалось определить загрузку процессора по счётчику производительности, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Основной монитор"
+ IDS_SECONDARY_DISPLAY = "Вторичный монитор <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Система была выведена из гибернации, соединение повторно инициализировано. (Переинициализаций: <%1%>)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Доступна новая версия: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Уведомление плагина TrafficMonitor"
+diff --git a/TrafficMonitor/language/Simplified_Chinese.ini b/TrafficMonitor/language/Simplified_Chinese.ini
+index 592e8d5..f800ec5 100644
+--- a/TrafficMonitor/language/Simplified_Chinese.ini
++++ b/TrafficMonitor/language/Simplified_Chinese.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "插件选项"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "使用性能计数器获取CPU利用率失败，fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "主显示器"
+ IDS_SECONDARY_DISPLAY = "副显示器 <%1%>"
++IDS_ALL_DISPLAYS = "所有显示器"
+ IDS_RESTORE_FROM_SLEEP_LOG = "系统已从休眠状态恢复，已重新初始化连接。（已重新初始化<%1%>次）"
+ IDS_PLUGIN_NEW_VERSION_INFO = "有更新，最新版本：<%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor 插件通知"
+diff --git a/TrafficMonitor/language/Slovenian.ini b/TrafficMonitor/language/Slovenian.ini
+index 8f1510a..b3346ad 100644
+--- a/TrafficMonitor/language/Slovenian.ini
++++ b/TrafficMonitor/language/Slovenian.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Možnosti vtičnika"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Pridobivanje uporabe CPE s števcem uspešnosti ni uspelo, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Primarni zaslon"
+ IDS_SECONDARY_DISPLAY = "Sekundarni zaslon <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Sistem je bil obnovljen iz mirovanja, povezava je bila ponovno inicializirana. (<%1%> krat je bila ponovno inicializirana.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Na voljo je posodobitev, najnovejša različica: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Obvestilo vtičnika TrafficMonitor"
+diff --git a/TrafficMonitor/language/Spanish.ini b/TrafficMonitor/language/Spanish.ini
+index c2d933d..09d6549 100644
+--- a/TrafficMonitor/language/Spanish.ini
++++ b/TrafficMonitor/language/Spanish.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Opciones de complemento"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Error al obtener el uso de CPU mediante el contador de rendimiento, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Pantalla principal"
+ IDS_SECONDARY_DISPLAY = "Pantalla secundaria <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "El sistema ha salido de la hibernación y la conexión se ha reiniciado. (<%1%> veces reiniciado.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Actualización disponible, última versión: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Notificación del complemento TrafficMonitor"
+diff --git a/TrafficMonitor/language/Spanish_Spain.ini b/TrafficMonitor/language/Spanish_Spain.ini
+index 6fd8abe..fbd3cea 100644
+--- a/TrafficMonitor/language/Spanish_Spain.ini
++++ b/TrafficMonitor/language/Spanish_Spain.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Configuración de plugin"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "¡Error al obtener el uso de CPU mediante el contador de rendimiento, fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Monitor principal"
+ IDS_SECONDARY_DISPLAY = "Monitor secundario <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "El sistema se ha reanudado de modo suspensión, reinicializando conexión. (Reinicializado <%1%> veces)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Actualización disponible, versión más reciente: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Notificación de plugins de TrafficMonitor"
+diff --git a/TrafficMonitor/language/Traditional_Chinese.ini b/TrafficMonitor/language/Traditional_Chinese.ini
+index 14e6291..94989dc 100644
+--- a/TrafficMonitor/language/Traditional_Chinese.ini
++++ b/TrafficMonitor/language/Traditional_Chinese.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "外掛選項"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "使用效能計數器獲取CPU利用率失敗，fullCounterPath=<%1%>"
+ IDS_PRIMARY_DISPLAY = "主顯示器"
+ IDS_SECONDARY_DISPLAY = "副顯示器 <%1%>"
++IDS_ALL_DISPLAYS = "所有顯示器"
+ IDS_RESTORE_FROM_SLEEP_LOG = "系統已從休眠狀態恢復，已重新初始化連線。（已重新初始化<%1%>次）"
+ IDS_PLUGIN_NEW_VERSION_INFO = "有更新，最新版本：<%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "TrafficMonitor 外掛通知"
+diff --git a/TrafficMonitor/language/Vietnamese.ini b/TrafficMonitor/language/Vietnamese.ini
+index fa2719e..2edbc0b 100644
+--- a/TrafficMonitor/language/Vietnamese.ini
++++ b/TrafficMonitor/language/Vietnamese.ini
+@@ -218,6 +218,7 @@ IDS_PLUGIN_OPTIONS = "Cài đặt Plugin"
+ IDS_GET_CPU_USAGE_BY_PDH_FAILED_LOG = "Lỗi đo CPU bằng performance counter, chi tiết=<%1%>"
+ IDS_PRIMARY_DISPLAY = "Màn hình chính"
+ IDS_SECONDARY_DISPLAY = "Màn hình phụ <%1%>"
++IDS_ALL_DISPLAYS = "All displays"
+ IDS_RESTORE_FROM_SLEEP_LOG = "Máy vừa tỉnh lại từ chế độ Sleep, đã cập nhật lại mạng. (Làm mới <%1%> lần.)"
+ IDS_PLUGIN_NEW_VERSION_INFO = "Đã có bản cập nhật mới: <%1%>"
+ IDS_TRAFFICMONITOR_PLUGIN_NITIFICATION = "Thông báo từ Plugin"
