@@ -21,7 +21,7 @@
 想改回单个显示器：右键任务栏窗口 → 选项 → 任务栏设置 → 「显示任务栏窗口的显示器」。
 
 > 压缩包内附 `使用说明.txt`、`LICENSE.txt`（上游许可证原文）、`NOTICE.txt`（非官方修改版与 AI 使用声明）。
-> 校验值：`sha256 = 1e9b0feb96632b507d3efd26c9992ae4a110b0fa82111644fe2fecdc0e49af9e`
+> 校验值：`sha256 = 9a0ffd222ce3f59b0d6ca8b0fcfc04de7bdc2e012bda8c81767bcfd128b111a3`
 
 ---
 
